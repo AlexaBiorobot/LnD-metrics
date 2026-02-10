@@ -4,6 +4,7 @@ import json
 import time
 import logging
 from typing import List, Dict, Any
+from datetime import date, timedelta, datetime
 
 import gspread
 from gspread.exceptions import APIError
@@ -21,8 +22,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# If GCP_SERVICE_ACCOUNT env var exists (JSON string), use it.
-# Otherwise use local service_account.json file.
 def get_client() -> gspread.Client:
     if os.getenv("GCP_SERVICE_ACCOUNT"):
         info = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
@@ -32,9 +31,7 @@ def get_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 # -------------------- CONFIG --------------------
-# Start reading source sheets from row 2 (skip headers).
 SOURCE_START_ROW = 2
-
 MAX_RETRIES = 6
 RETRY_SLEEP_SEC = 2
 
@@ -86,8 +83,9 @@ SOURCES: List[Dict[str, Any]] = [
 TARGET = {
     "spreadsheet_id": "1EoEheuL204rkwsY-F7AkrjKQfWh-0PJShf9Np6k8OV0",
     "worksheet": "raw data for quality",
-    "range_start": "A2",   # write from row 2
-    "clear_range": "A2:E", # clear only A2:E (do not touch header row / other columns)
+    "range_start": "A2",
+    "clear_range": "A2:E",
+    "date_pattern": "dd.mm.yyyy",  # формат для A и C
 }
 
 # -------------------- HELPERS --------------------
@@ -97,7 +95,6 @@ def api_retry(func, *args, **kwargs):
             return func(*args, **kwargs)
         except APIError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
-            # Retry only for temporary API/server errors
             if status in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
                 sleep_for = RETRY_SLEEP_SEC * attempt
                 logging.warning(f"APIError {status}, retry {attempt}/{MAX_RETRIES}, sleep {sleep_for}s")
@@ -112,74 +109,52 @@ def api_retry(func, *args, **kwargs):
                 continue
             raise
 
-def normalize_cell(v: Any) -> str:
-    return "" if v is None else str(v)
+def to_text(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
 
-def read_source_rows(gc: gspread.Client, source: Dict[str, Any]) -> List[List[str]]:
-    sh = api_retry(gc.open_by_key, source["spreadsheet_id"])
-    ws = api_retry(sh.worksheet, source["worksheet"])
+def to_sheet_date(v: Any) -> str:
+    """
+    Возвращает дату в формате YYYY-MM-DD, чтобы Sheets корректно распознало USER_ENTERED.
+    Если распарсить не удалось — возвращает исходное значение как текст.
+    """
+    if v is None:
+        return ""
 
-    col_letters = source["columns"]
-    ranges = [f"{c}{SOURCE_START_ROW}:{c}" for c in col_letters]
+    # Если пришло число (часто так выглядят даты при UNFORMATTED_VALUE)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        num = float(v)
+        # Типичный диапазон серийных дат Google Sheets
+        if 20000 <= num <= 80000:
+            d = date(1899, 12, 30) + timedelta(days=num)
+            return d.strftime("%Y-%m-%d")
+        return to_text(v)
 
-    # One request for all needed columns
-    batch = api_retry(ws.batch_get, ranges)
+    s = str(v).strip()
+    if not s:
+        return ""
 
-    # Convert each column range to plain list of values
-    cols_data: List[List[str]] = []
-    for col_block in batch:
-        col_values = []
-        for row in col_block:
-            # row is usually like ["value"] or []
-            if row:
-                col_values.append(normalize_cell(row[0]))
-            else:
-                col_values.append("")
-        cols_data.append(col_values)
+    s = s.replace("-", "-").replace("–", "-")
 
-    max_len = max((len(c) for c in cols_data), default=0)
-    out_rows: List[List[str]] = []
+    # В первую очередь day/month, т.к. у тебя данные такого вида встречаются чаще
+    formats = [
+        "%d.%m.%Y", "%d.%m.%y",
+        "%d/%m/%Y", "%d/%m/%y",
+        "%Y-%m-%d",
+        "%d-%m-%Y", "%d-%m-%y",
+        "%m/%d/%Y", "%m/%d/%y",  # fallback
+    ]
 
-    for i in range(max_len):
-        row4 = [(c[i] if i < len(c) else "") for c in cols_data]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(s, fmt).date()
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
 
-        # Skip fully empty rows from source
-        if any(cell.strip() != "" for cell in row4):
-            out_rows.append(row4 + [source["region"]])
+    return s  # если это не дата, оставляем как есть
 
-    logging.info(
-        f'{source["region"]}: pulled {len(out_rows)} rows from '
-        f'{source["worksheet"]} ({source["spreadsheet_id"]})'
-    )
-    return out_rows
-
-def write_target(gc: gspread.Client, rows: List[List[str]]) -> None:
-    sh = api_retry(gc.open_by_key, TARGET["spreadsheet_id"])
-    ws = api_retry(sh.worksheet, TARGET["worksheet"])
-
-    # Clear only A2:E (header row and other columns remain untouched)
-    api_retry(ws.batch_clear, [TARGET["clear_range"]])
-
-    if rows:
-        # Write only A:E starting from A2
-        api_retry(
-            ws.update,
-            range_name=TARGET["range_start"],
-            values=rows,
-            value_input_option="RAW"
-        )
-
-    logging.info(f"Target updated: {len(rows)} rows written into A2:E")
-
-def main():
-    gc = get_client()
-
-    all_rows: List[List[str]] = []
-    for src in SOURCES:
-        all_rows.extend(read_source_rows(gc, src))
-
-    write_target(gc, all_rows)
-    logging.info("Done ✅")
-
-if __name__ == "__main__":
-    main()
+def re
