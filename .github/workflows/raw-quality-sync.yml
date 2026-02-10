@@ -1,9 +1,9 @@
 name: Sync raw data for quality
 
 on:
-  workflow_dispatch:   # ручной запуск из вкладки Actions
+  workflow_dispatch:
   schedule:
-    - cron: "17,47 * * * *"  # каждые 30 минут (в UTC), не на 00-й минуте
+    - cron: "0 9,21 * * *"
 
 permissions:
   contents: read
