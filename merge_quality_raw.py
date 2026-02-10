@@ -157,4 +157,123 @@ def to_sheet_date(v: Any) -> str:
 
     return s  # если это не дата, оставляем как есть
 
-def re
+def read_source_rows(gc: gspread.Client, source: Dict[str, Any]) -> List[List[str]]:
+    sh = api_retry(gc.open_by_key, source["spreadsheet_id"])
+    ws = api_retry(sh.worksheet, source["worksheet"])
+
+    col_letters = source["columns"]
+    ranges = [f"{c}{SOURCE_START_ROW}:{c}" for c in col_letters]
+
+    # UNFORMATTED_VALUE помогает получать настоящие числа/даты из ячеек
+    batch = api_retry(
+        ws.batch_get,
+        ranges,
+        value_render_option="UNFORMATTED_VALUE"
+    )
+
+    cols_data: List[List[Any]] = []
+    for col_block in batch:
+        col_values = []
+        for row in col_block:
+            if row:
+                col_values.append(row[0])
+            else:
+                col_values.append("")
+        cols_data.append(col_values)
+
+    max_len = max((len(c) for c in cols_data), default=0)
+    out_rows: List[List[str]] = []
+
+    for i in range(max_len):
+        row4 = [(c[i] if i < len(c) else "") for c in cols_data]
+
+        if any(to_text(x) != "" for x in row4):
+            # A (index 0) и C (index 2) приводим к дате
+            row4[0] = to_sheet_date(row4[0])
+            row4[2] = to_sheet_date(row4[2])
+
+            # Остальное приводим к тексту
+            row4 = [to_text(x) for x in row4]
+
+            out_rows.append(row4 + [source["region"]])
+
+    logging.info(
+        f'{source["region"]}: pulled {len(out_rows)} rows '
+        f'from {source["worksheet"]} ({source["spreadsheet_id"]})'
+    )
+    return out_rows
+
+def apply_date_format(sh: gspread.Spreadsheet, ws: gspread.Worksheet):
+    """
+    Форматирует колонки A и C (начиная со 2-й строки) как DATE dd.mm.yyyy
+    """
+    pattern = TARGET["date_pattern"]
+    requests = [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1,      # row 2
+                    "startColumnIndex": 0,   # A
+                    "endColumnIndex": 1
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "DATE", "pattern": pattern}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1,      # row 2
+                    "startColumnIndex": 2,   # C
+                    "endColumnIndex": 3
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "DATE", "pattern": pattern}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        },
+    ]
+    api_retry(sh.batch_update, {"requests": requests})
+
+def write_target(gc: gspread.Client, rows: List[List[str]]) -> None:
+    sh = api_retry(gc.open_by_key, TARGET["spreadsheet_id"])
+    ws = api_retry(sh.worksheet, TARGET["worksheet"])
+
+    # Очищаем только A2:E
+    api_retry(ws.batch_clear, [TARGET["clear_range"]])
+
+    if rows:
+        # USER_ENTERED -> строки YYYY-MM-DD будут распознаны как даты
+        api_retry(
+            ws.update,
+            range_name=TARGET["range_start"],
+            values=rows,
+            value_input_option="USER_ENTERED"
+        )
+
+    # Применяем формат дат к A и C
+    apply_date_format(sh, ws)
+
+    logging.info(f"Target updated: {len(rows)} rows written into A2:E (A,C as DATE)")
+
+def main():
+    gc = get_client()
+
+    all_rows: List[List[str]] = []
+    for src in SOURCES:
+        all_rows.extend(read_source_rows(gc, src))
+
+    write_target(gc, all_rows)
+    logging.info("Done ✅")
+
+if __name__ == "__main__":
+    main()
