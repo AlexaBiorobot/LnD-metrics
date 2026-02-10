@@ -1,0 +1,30 @@
+name: Sync raw data for quality
+
+on:
+  workflow_dispatch:   # ручной запуск из вкладки Actions
+  schedule:
+    - cron: "17,47 * * * *"  # каждые 30 минут (в UTC), не на 00-й минуте
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync script
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: python merge_quality_raw.py
