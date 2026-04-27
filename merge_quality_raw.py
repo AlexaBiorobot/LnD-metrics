@@ -40,42 +40,56 @@ SOURCES: List[Dict[str, Any]] = [
         "spreadsheet_id": "1yJmskKLGinBNKIV3ewXsVEfnh-JRj_FhuKyElL93vM4",
         "worksheet": "data",
         "columns": ["B", "C", "J", "K"],
+        "lesson_number_col": "G",
+        "course_col": "E",
         "region": "Latam",
     },
     {
         "spreadsheet_id": "1njy8V5lyG3vyENr1b50qGd3infU4VHYP4CfaD0H1AlM",
         "worksheet": "Lessons",
         "columns": ["B", "V", "J", "L"],
+        "lesson_number_col": "G",
+        "course_col": "E",
         "region": "Brazil",
     },
     {
         "spreadsheet_id": "1WFFz_wdZtXZQqzq0o0AObXGsTxait9LKbIbUQbSoMV8",
         "worksheet": "Storage",
         "columns": ["I", "DS", "A", "M"],
+        "lesson_number_col": "G",
+        "course_col": "F",
         "region": "Italy",
     },
     {
         "spreadsheet_id": "1mmlCG9YUnJ3NhEiTvyGDWGmdKNH7qrtClixLqcH_70o",
         "worksheet": "Storage",
         "columns": ["I", "DS", "A", "M"],
+        "lesson_number_col": "G",
+        "course_col": "F",
         "region": "Poland",
     },
     {
         "spreadsheet_id": "1nxV0u0Ag2NUs7cCqBU4zTYkGq0d9aPExqqC4RCeatsg",
         "worksheet": "Reports",
         "columns": ["C", "CA", "L", "N"],
+        "lesson_number_col": "H",
+        "course_col": "F",
         "region": "MENA",
     },
     {
         "spreadsheet_id": "1hQdxvhDMheOpefUudtXCMfoYlBmPFXyUL8A4HlutWv4",
         "worksheet": "Reports",
         "columns": ["C", "BZ", "L", "N"],
+        "lesson_number_col": "H",
+        "course_col": "F",
         "region": "Asia",
     },
     {
         "spreadsheet_id": "12jG5O-NF4uIolzPcTD8p8_yfO8TSsSRGigmqtCu3E5k",
         "worksheet": "Reports",
         "columns": ["B", "L", "J", "K"],
+        "lesson_number_col": "G",
+        "course_col": "E",
         "region": "ENG",
     },
 ]
@@ -84,7 +98,7 @@ TARGET = {
     "spreadsheet_id": "1EoEheuL204rkwsY-F7AkrjKQfWh-0PJShf9Np6k8OV0",
     "worksheet": "raw data for quality",
     "range_start": "A2",
-    "clear_range": "A2:E",
+    "clear_range": "A2:G",
     "date_pattern": "dd.mm.yyyy",  # формат для A и C
 }
 
@@ -161,7 +175,12 @@ def read_source_rows(gc: gspread.Client, source: Dict[str, Any]) -> List[List[st
     sh = api_retry(gc.open_by_key, source["spreadsheet_id"])
     ws = api_retry(sh.worksheet, source["worksheet"])
 
-    col_letters = source["columns"]
+    # 4 старые колонки + Lesson Number + Course
+    col_letters = source["columns"] + [
+        source["lesson_number_col"],
+        source["course_col"],
+    ]
+
     ranges = [f"{c}{SOURCE_START_ROW}:{c}" for c in col_letters]
 
     # UNFORMATTED_VALUE помогает получать настоящие числа/даты из ячеек
@@ -185,17 +204,22 @@ def read_source_rows(gc: gspread.Client, source: Dict[str, Any]) -> List[List[st
     out_rows: List[List[str]] = []
 
     for i in range(max_len):
-        row4 = [(c[i] if i < len(c) else "") for c in cols_data]
+        row6 = [(c[i] if i < len(c) else "") for c in cols_data]
 
-        if any(to_text(x) != "" for x in row4):
-            # A (index 0) и C (index 2) приводим к дате
-            row4[0] = to_sheet_date(row4[0])
-            row4[2] = to_sheet_date(row4[2])
+        if any(to_text(x) != "" for x in row6):
+            # A / первая старая колонка и C / третья старая колонка приводим к дате
+            row6[0] = to_sheet_date(row6[0])
+            row6[2] = to_sheet_date(row6[2])
 
             # Остальное приводим к тексту
-            row4 = [to_text(x) for x in row4]
+            row6 = [to_text(x) for x in row6]
 
-            out_rows.append(row4 + [source["region"]])
+            # Итог:
+            # A-D = старые 4 колонки
+            # E = region
+            # F = Lesson Number
+            # G = Course
+            out_rows.append(row6[:4] + [source["region"], row6[4], row6[5]])
 
     logging.info(
         f'{source["region"]}: pulled {len(out_rows)} rows '
@@ -263,7 +287,7 @@ def write_target(gc: gspread.Client, rows: List[List[str]]) -> None:
     # Применяем формат дат к A и C
     apply_date_format(sh, ws)
 
-    logging.info(f"Target updated: {len(rows)} rows written into A2:E (A,C as DATE)")
+    logging.info(f"Target updated: {len(rows)} rows written into A2:G (A,C as DATE)")
 
 def main():
     gc = get_client()
